@@ -1,799 +1,700 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Shorts Video Downloader Bot
+Supports: YouTube Shorts, Instagram Reels, TikTok
+"""
+
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import yt_dlp
+import re
 import asyncio
-import time
-from collections import defaultdict
 from datetime import datetime
-import traceback
-from database import Database
-import threading
-from healthcheck import start_health_server
+from pathlib import Path
+from typing import Optional, Tuple
+import yt_dlp
 
-# ==================== LOGGING ====================
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8341836427:AAHzwfnI68RJawROjOfHCwgAtkSQjvUg8nk')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '6351892611'))
+
+# Logging setup
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-logging.getLogger('yt_dlp').setLevel(logging.WARNING)
-logging.getLogger('httpx').setLevel(logging.WARNING)
 
-# ==================== CONFIG ====================
-# Local uchun default token, Railway'da environment variable
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8341836427:AAHzwfnI68RJawROjOfHCwgAtkSQjvUg8nk')
-ADMIN_IDS = [int(os.getenv('ADMIN_ID', '6351892611'))]
+# Download directory
+DOWNLOAD_DIR = Path("downloads")
+DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-if not BOT_TOKEN:
-    logger.critical("❌ BOT_TOKEN topilmadi!")
-    raise ValueError("BOT_TOKEN o'rnatilmagan!")
+# Platform detection patterns
+PLATFORM_PATTERNS = {
+    'youtube': r'(youtube\.com/shorts/|youtu\.be/)',
+    'instagram': r'(instagram\.com/reel/|instagram\.com/p/)',
+    'tiktok': r'(tiktok\.com/@[\w\.]+/video/|vm\.tiktok\.com/|vt\.tiktok\.com/)',
+}
 
-logger.info(f"✅ Config loaded. Admin ID: {ADMIN_IDS[0]}")
+# Quality presets
+QUALITY_PRESETS = {
+    '144p': {'height': 144, 'label': '144p'},
+    '360p': {'height': 360, 'label': '360p'},
+    '480p': {'height': 480, 'label': '480p (SD)'},
+    '720p': {'height': 720, 'label': '720p (HD)'},
+    '1080p': {'height': 1080, 'label': '1080p (Full HD)'},
+}
 
-# ==================== GLOBALS ====================
-user_videos = {}
-user_requests = defaultdict(list)
-error_stats = defaultdict(int)
-MAX_REQUESTS_PER_MINUTE = 5
+# Rate limiting
+user_last_download = {}
+RATE_LIMIT_SECONDS = 12
 
-# ✨ DATABASE
-db = Database()
+# ============================================================================
+# DATABASE
+# ============================================================================
 
+try:
+    from database import Database
 
-# ==================== ERROR HANDLER ====================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Global error handler"""
-    logger.error("❌ Exception while handling an update:", exc_info=context.error)
-
-    error_type = type(context.error).__name__
-    error_stats[error_type] += 1
-
-    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
-    tb_string = ''.join(tb_list)
-    logger.error(f"Full traceback:\n{tb_string}")
-
-    if update and isinstance(update, Update):
-        try:
-            error_messages = {
-                "NetworkError": "🌐 Internet muammosi. Qaytadan urinib ko'ring.",
-                "TimedOut": "⏱ Vaqt tugadi. Qaytadan urinib ko'ring.",
-                "BadRequest": "❌ Noto'g'ri so'rov. Qaytadan boshlang: /start",
-                "Forbidden": "🚫 Bot bloklangan. Blokdan chiqaring.",
-                "RetryAfter": "⏳ Juda tez! Biroz kuting.",
-                "TelegramError": "📡 Telegram xatoligi. Biroz kutib qaytadan urinib ko'ring.",
-            }
-
-            user_message = error_messages.get(
-                error_type,
-                "❌ Kutilmagan xatolik yuz berdi!\n\n"
-                "Qaytadan urinib ko'ring yoki /start bosing.\n\n"
-                "Muammo davom etsa: @d_jumanazarov"
-            )
-
-            if update.effective_message:
-                await update.effective_message.reply_text(user_message)
-            elif update.callback_query:
-                await update.callback_query.answer(user_message, show_alert=True)
-
-        except Exception as e:
-            logger.error(f"Error handler failed to send message: {e}")
+    db = Database()
+    logger.info("✅ Light Database initialized")
+except Exception as e:
+    logger.error(f"❌ Database error: {e}")
+    db = None
 
 
-# ==================== HELPERS ====================
-def check_rate_limit(user_id):
-    """Rate limiting"""
-    now = time.time()
-    user_requests[user_id] = [t for t in user_requests[user_id] if now - t < 60]
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
 
-    if len(user_requests[user_id]) >= MAX_REQUESTS_PER_MINUTE:
-        return False
-
-    user_requests[user_id].append(now)
-    return True
-
-
-def cleanup_old_files():
-    """Eski fayllarni tozalash"""
-    try:
-        if not os.path.exists('downloads'):
-            return
-
-        now = time.time()
-        deleted = 0
-
-        for filename in os.listdir('downloads'):
-            filepath = os.path.join('downloads', filename)
-            if os.path.isfile(filepath) and now - os.path.getmtime(filepath) > 1800:
-                os.remove(filepath)
-                deleted += 1
-
-        if deleted > 0:
-            logger.info(f"🧹 Cleaned up {deleted} old files")
-    except Exception as e:
-        logger.error(f"Cleanup error: {e}")
+def detect_platform(url: str) -> Optional[str]:
+    """Detect platform from URL"""
+    for platform, pattern in PLATFORM_PATTERNS.items():
+        if re.search(pattern, url, re.IGNORECASE):
+            return platform
+    return None
 
 
-def detect_platform_and_type(url):
-    """Platform va video turini aniqlash"""
-    try:
-        url_lower = url.lower()
-
-        if 'instagram.com/reel' in url_lower or 'instagr.am/reel' in url_lower:
-            return 'instagram', 'shorts', True
-        elif 'instagram.com' in url_lower or 'instagr.am' in url_lower:
-            return 'instagram', 'post', False
-        elif 'youtube.com/shorts' in url_lower:
-            return 'youtube', 'shorts', True
-        elif 'youtu.be/' in url_lower:
-            return 'youtube', 'short_link', True
-        elif 'youtube.com/watch' in url_lower:
-            return 'youtube', 'video', False
-        elif 'tiktok.com' in url_lower:
-            return 'tiktok', 'shorts', True
-        else:
-            return 'other', 'unknown', False
-    except Exception as e:
-        logger.error(f"Platform detection error: {e}")
-        return 'other', 'unknown', False
+def is_shorts_url(url: str) -> bool:
+    """Check if URL is a short-form video"""
+    shorts_patterns = [
+        r'youtube\.com/shorts/',
+        r'instagram\.com/reel/',
+        r'tiktok\.com/@[\w\.]+/video/',
+        r'vm\.tiktok\.com/',
+        r'vt\.tiktok\.com/',
+    ]
+    return any(re.search(pattern, url, re.IGNORECASE) for pattern in shorts_patterns)
 
 
-# ==================== COMMANDS ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command"""
-    try:
-        user_id = update.effective_user.id
-        username = update.effective_user.username or "User"
-        first_name = update.effective_user.first_name or "User"
+def format_size(size_bytes: int) -> str:
+    """Format file size"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f}{unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f}TB"
 
-        logger.info(f"👤 User {user_id} (@{username}) started bot")
 
-        # ✨ DATABASE'GA QO'SHISH
-        db.add_user(user_id, username, first_name)
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename"""
+    return re.sub(r'[<>:"/\\|?*]', '_', filename)[:100]
 
-        await update.message.reply_text(
-            "🎬 *Salom! Shorts Video Downloader Botga xush kelibsiz!*\n\n"
-            "📌 *Qanday ishlaydi:*\n\n"
-            "1️⃣ Faqat Shorts video linkini yuboring\n"
-            "2️⃣ Sifatni tanlang\n"
-            "3️⃣ Videoni yuklab oling!\n\n"
-            "✅ *Qo'llab-quvvatlanadigan formatlar:*\n"
-            "• YouTube Shorts\n"
-            "• Instagram Reels\n"
-            "• TikTok videolar\n\n"
-            "⚠️ *Muhim:* Faqat qisqa videolar (Shorts/Reels) yuklanadi!\n"
-            "Oddiy uzun YouTube videolar qabul qilinmaydi.\n\n"
-            "📊 Yordam: /help",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"/start error: {e}")
-        await update.message.reply_text("❌ Xatolik. Qaytadan urinib ko'ring.")
+
+# ============================================================================
+# COMMAND HANDLERS
+# ============================================================================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command"""
+    user = update.effective_user
+
+    if db:
+        db.add_user(user.id, user.username or "Unknown")
+
+    logger.info(f"👤 User {user.id} (@{user.username}) started bot")
+
+    start_text = """
+🎬 **Salom! Shorts Video Downloader Botga xush kelibsiz!**
+
+📌 **Qanday ishlaydi:**
+1️⃣ Faqat Shorts video linkini yuboring
+2️⃣ Sifatni tanlang
+3️⃣ Videoni yuklab oling!
+
+✅ **Qo'llab-quvvatlanadigan formatlar:**
+• YouTube Shorts
+• Instagram Reels
+• TikTok videolar
+
+⚠️ **Muhim:** Faqat qisqa videolar (Shorts/Reels) yuklanadi. Oddiy uzun YouTube videolar qabul qilinmaydi.
+
+📊 **Yordam:** /help
+"""
+
+    keyboard = [[InlineKeyboardButton("📚 Yordam", callback_data="help")]]
+
+    await update.message.reply_text(
+        start_text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command"""
-    try:
-        await update.message.reply_text(
-            "📖 *Yordam*\n\n"
-            "🎬 *Qabul qilinadigan linklar:*\n\n"
-            "✅ YouTube Shorts:\n"
-            "   `youtube.com/shorts/...`\n"
-            "   `youtu.be/...` (qisqa link)\n\n"
-            "✅ Instagram Reels:\n"
-            "   `instagram.com/reel/...`\n\n"
-            "✅ TikTok:\n"
-            "   `tiktok.com/@.../video/...`\n\n"
-            "❌ *Qabul qilinmaydi:*\n"
-            "   Oddiy YouTube videolar\n"
-            "   Uzun formatli videolar\n\n"
-            "💡 Bot faqat 50MB gacha videolarni yuklay oladi.\n\n"
-            "⏱ Limit: 5 video/daqiqa per user\n\n"
-            "📊 *Komandalar:*\n"
-            "/start - Boshlash\n"
-            "/help - Yordam\n"
-            "/mystat - Sizning statistikangiz\n\n"
-            "👨‍💻 Murojaat: @d_jumanazarov",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"/help error: {e}")
+    """Handle /help command"""
+    help_text = """
+📚 **YORDAM - QANDAY ISHLAYDI?**
 
+🎬 **Qo'llab-quvvatlanadigan formatlar:**
+• YouTube Shorts
+• Instagram Reels
+• TikTok videolar
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stats command - admin only"""
-    try:
-        user_id = update.effective_user.id
+📝 **Ishlatish:**
+1️⃣ Faqat Shorts video linkini yuboring
+2️⃣ Sifatni tanlang
+3️⃣ Videoni yuklab oling!
 
-        if user_id not in ADMIN_IDS:
-            await update.message.reply_text("❌ Bu komanda faqat admin uchun!")
-            return
+⚙️ **Sifat tanlovi:**
+• 144p - Eng yengil
+• 360p - Yaxshi
+• 480p - SD
+• 720p - HD
+• 1080p - Full HD
 
-        # ✨ LIGHT STATISTIKA
-        total_users = db.get_total_users()
-        total_downloads = db.get_total_downloads()
-        platform_stats = db.get_platform_stats()
-        quality_stats = db.get_quality_stats()
+⚠️ **Muhim:**
+• Faqat qisqa videolar (Shorts/Reels) yuklanadi
+• Oddiy uzun YouTube videolar qabul qilinmaydi
 
-        stats_text = (
-            f"📊 *Bot Statistikasi*\n\n"
-            f"👥 Jami foydalanuvchilar: {total_users}\n"
-            f"⬇️ Jami yuklanishlar: {total_downloads}\n"
-            f"📹 Hozir yuklanayotgan: {len(user_videos)}\n\n"
-        )
+💬 **Yordam kerakmi?**
+Admin: @d_jumanazarov
 
-        # Platform statistikasi
-        if platform_stats:
-            stats_text += "🌐 *Platformalar:*\n"
-            platform_emojis = {
-                'youtube': '▶️ YouTube',
-                'instagram': '📸 Instagram',
-                'tiktok': '🎵 TikTok'
-            }
-            for row in platform_stats:
-                emoji = platform_emojis.get(row['platform'], f"🎬 {row['platform'].title()}")
-                stats_text += f"{emoji}: {row['downloads']}\n"
-            stats_text += "\n"
+📊 **Boshqa komandalar:**
+/mystat - Sizning statistikangiz
+"""
 
-        # Sifat statistikasi
-        if quality_stats:
-            stats_text += "🎬 *Top 5 Sifatlar:*\n"
-            for row in quality_stats[:5]:
-                stats_text += f"• {row['quality']}: {row['count']}\n"
-            stats_text += "\n"
-
-        stats_text += f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-
-        await update.message.reply_text(stats_text, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"/stats error: {e}")
-        await update.message.reply_text("❌ Xatolik yuz berdi")
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
 async def mystat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User o'z statistikasini ko'radi"""
-    try:
-        user_id = update.effective_user.id
-        username = update.effective_user.username or update.effective_user.first_name
+    """Show user statistics"""
+    user_id = update.effective_user.id
 
-        # User ma'lumotini olish
-        cursor = db.conn.cursor()
-        cursor.execute('''
-            SELECT first_seen, last_seen FROM users WHERE user_id = ?
-        ''', (user_id,))
+    if not db:
+        await update.message.reply_text("❌ Statistika mavjud emas")
+        return
 
-        user_data = cursor.fetchone()
+    stats = db.get_user_stats(user_id)
 
-        if not user_data:
-            await update.message.reply_text("❌ Ma'lumot topilmadi. /start bosing!")
-            return
+    stat_text = f"""
+📊 **Sizning statistikangiz:**
 
-        first_seen = datetime.fromisoformat(user_data['first_seen'])
-        days_active = (datetime.now() - first_seen).days
+📥 Jami yuklashlar: {stats['downloads']}
+🎬 YouTube: {stats['youtube']}
+📸 Instagram: {stats['instagram']}
+🎵 TikTok: {stats['tiktok']}
+🔝 Top 5 sifatlar:
+"""
 
-        total_users = db.get_total_users()
-        total_downloads = db.get_total_downloads()
+    for quality, count in stats['top_qualities']:
+        stat_text += f"• {quality}: {count}\n"
 
-        mystat_text = (
-            f"📊 *Sizning Statistikangiz*\n\n"
-            f"👤 User: {username}\n"
-            f"🆔 ID: `{user_id}`\n"
-            f"📅 Qo'shilgan: {first_seen.strftime('%Y-%m-%d')}\n"
-            f"⏰ Faollik: {days_active} kun\n\n"
-            f"🌐 *Bot Statistikasi:*\n"
-            f"👥 Jami userlar: {total_users}\n"
-            f"⬇️ Jami yuklanishlar: {total_downloads}"
-        )
+    stat_text += f"\n🕐 {stats['last_download']}"
 
-        await update.message.reply_text(mystat_text, parse_mode='Markdown')
+    await update.message.reply_text(stat_text, parse_mode='Markdown')
 
-    except Exception as e:
-        logger.error(f"/mystat error: {e}")
-        await update.message.reply_text("❌ Xatolik yuz berdi")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin statistics (Admin only)"""
+    user_id = update.effective_user.id
+
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔️ Bu komanda faqat admin uchun!")
+        return
+
+    if not db:
+        await update.message.reply_text("❌ Statistika mavjud emas")
+        return
+
+    stats = db.get_global_stats()
+
+    stat_text = f"""
+📊 **GLOBAL STATISTIKA**
+
+👥 Jami foydalanuvchilar: {stats['total_users']}
+📥 Jami yuklashlar: {stats['total_downloads']}
+
+📊 Platformalar:
+• YouTube: {stats['youtube']}
+• Instagram: {stats['instagram']}
+• TikTok: {stats['tiktok']}
+
+🎬 Top 5 Sifatlar:
+"""
+
+    for quality, count in stats['top_qualities']:
+        stat_text += f"• {quality}: {count}\n"
+
+    stat_text += f"\n• Eng yaxshi: {stats['most_used']}\n"
+
+    await update.message.reply_text(stat_text, parse_mode='Markdown')
 
 
 async def errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Errors command - admin only"""
-    try:
-        user_id = update.effective_user.id
+    """Show recent errors (Admin only)"""
+    user_id = update.effective_user.id
 
-        logger.info(f"🔍 /errors called by {user_id}")
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔️ Bu komanda faqat admin uchun!")
+        return
 
-        if user_id not in ADMIN_IDS:
-            await update.message.reply_text("❌ Bu komanda faqat admin uchun!")
-            return
+    if not db:
+        await update.message.reply_text("❌ Xatoliklar mavjud emas")
+        return
 
-        if not error_stats:
-            await update.message.reply_text("✅ Hech qanday xatolik yo'q!")
-            return
+    errors = db.get_recent_errors(limit=10)
 
-        stats_text = "📊 *Xatolik Statistikasi:*\n\n"
+    if not errors:
+        await update.message.reply_text("✅ Hech qanday xatolik yo'q!")
+        return
 
-        for error_type, count in sorted(error_stats.items(), key=lambda x: x[1], reverse=True):
-            stats_text += f"• {error_type}: {count}x\n"
+    error_text = "❌ **OXIRGI XATOLIKLAR:**\n\n"
 
-        await update.message.reply_text(stats_text, parse_mode='Markdown')
+    for error in errors:
+        error_text += f"🕐 {error['timestamp']}\n"
+        error_text += f"👤 User: {error['user_id']}\n"
+        error_text += f"⚠️ {error['error_message'][:100]}...\n\n"
 
-    except Exception as e:
-        logger.error(f"/errors error: {e}")
-        await update.message.reply_text("❌ Xatolik yuz berdi")
-
-
-# ==================== MESSAGE HANDLERS ====================
-async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Link qabul qilish"""
-    try:
-        url = update.message.text.strip()
-        user_id = update.effective_user.id
-
-        logger.info(f"📥 User {user_id} sent URL: {url[:50]}...")
-
-        if not check_rate_limit(user_id):
-            await update.message.reply_text(
-                "⏱ *Juda tez yuborilmoqda!*\n\n"
-                "Iltimos, 1 daqiqa kuting.\n"
-                "Limit: 5 video/daqiqa",
-                parse_mode='Markdown'
-            )
-            return
-
-        platform, video_type, is_shorts = detect_platform_and_type(url)
-
-        logger.info(f"📊 Detected: {platform.upper()} - {video_type}")
-
-        if not is_shorts:
-            platform_messages = {
-                'youtube': (
-                    "❌ *Kechirasiz, faqat Shorts videolar yuklanadi!*\n\n"
-                    "Siz oddiy YouTube video linkini yubordingiz.\n\n"
-                    "✅ *To'g'ri link:*\n"
-                    "`youtube.com/shorts/XXXXX`\n\n"
-                    "💡 YouTube Shorts videolarini yuboring!"
-                ),
-                'instagram': (
-                    "❌ *Kechirasiz, faqat Reels yuklanadi!*\n\n"
-                    "Siz oddiy Instagram post linkini yubordingiz.\n\n"
-                    "✅ *To'g'ri link:*\n"
-                    "`instagram.com/reel/XXXXX`\n\n"
-                    "💡 Instagram Reels videolarini yuboring!"
-                ),
-                'other': (
-                    "❌ *Kechirasiz, bu link qo'llab-quvvatlanmaydi!*\n\n"
-                    "✅ *Qo'llab-quvvatlanadigan platformalar:*\n"
-                    "• YouTube Shorts\n"
-                    "• Instagram Reels\n"
-                    "• TikTok\n\n"
-                    "Yordam: /help"
-                )
-            }
-
-            message = platform_messages.get(platform, platform_messages['other'])
-            await update.message.reply_text(message, parse_mode='Markdown')
-            return
-
-        user_videos[user_id] = {'url': url, 'platform': platform}
-
-        keyboard = [
-            [
-                InlineKeyboardButton("📱 144p", callback_data="quality_144"),
-                InlineKeyboardButton("📺 360p", callback_data="quality_360"),
-            ],
-            [
-                InlineKeyboardButton("🎬 480p", callback_data="quality_480"),
-                InlineKeyboardButton("🔥 720p", callback_data="quality_720"),
-            ],
-            [
-                InlineKeyboardButton("💎 1080p (Full HD)", callback_data="quality_1080"),
-            ],
-            [
-                InlineKeyboardButton("⭐ Eng yaxshi", callback_data="quality_best"),
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        platform_emoji = {
-            'instagram': '📸 Instagram Reels',
-            'youtube': '▶️ YouTube Shorts',
-            'tiktok': '🎵 TikTok',
-            'other': '🎬 Shorts'
-        }
-
-        await update.message.reply_text(
-            f"✅ *{platform_emoji.get(platform, '🎬 Shorts')} aniqlandi!*\n\n"
-            f"📊 *Qaysi sifatda yuklab olmoqchisiz?*\n\n"
-            "💡 Past sifat = Tezroq\n"
-            "⭐ Yuqori sifat = Sifatli",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        logger.error(f"receive_link error: {e}", exc_info=True)
-        await update.message.reply_text("❌ Xatolik. Qaytadan link yuboring.")
+    await update.message.reply_text(error_text, parse_mode='Markdown')
 
 
-async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quality selection handler"""
+# ============================================================================
+# BUTTON CALLBACK HANDLER
+# ============================================================================
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button callbacks"""
     query = update.callback_query
+    await query.answer()
 
-    try:
-        await query.answer()
+    data = query.data
 
-        user_id = query.from_user.id
-        user_data = user_videos.get(user_id)
+    # Help button
+    if data == "help":
+        help_text = """
+📚 **YORDAM - QANDAY ISHLAYDI?**
 
-        if not user_data:
-            await query.edit_message_text("❌ Link topilmadi. Qaytadan yuboring.")
-            return
+🎬 **Qo'llab-quvvatlanadigan formatlar:**
+• YouTube Shorts
+• Instagram Reels
+• TikTok videolar
 
-        url = user_data['url']
-        platform = user_data['platform']
-        quality = query.data.split('_')[1]
+📝 **Ishlatish:**
+1️⃣ Faqat Shorts video linkini yuboring
+2️⃣ Sifatni tanlang
+3️⃣ Videoni yuklab oling!
 
-        # Quality mappings
-        if platform == 'instagram':
-            quality_map = {
-                '144': {'format': 'worst', 'target': 256, 'name': '144p'},
-                '360': {'format': 'bestvideo[height<=640]+bestaudio/best[height<=640]', 'target': 640, 'name': '360p'},
-                '480': {'format': 'bestvideo[height<=854]+bestaudio/best[height<=854]', 'target': 854, 'name': '480p'},
-                '720': {'format': 'bestvideo[height<=1280]+bestaudio/best[height<=1280]', 'target': 1280,
-                        'name': '720p'},
-                '1080': {'format': 'bestvideo[height<=1920]+bestaudio/best[height<=1920]', 'target': 1920,
-                         'name': '1080p (Full HD)'},
-                'best': {'format': 'best', 'target': 9999, 'name': 'Eng yaxshi'}
-            }
-        else:
-            quality_map = {
-                '144': {'format': 'bestvideo[height<=256]+bestaudio/best[height<=256]/worst', 'target': 256,
-                        'name': '144p'},
-                '360': {'format': 'bestvideo[height<=640]+bestaudio/best[height<=640]', 'target': 640, 'name': '360p'},
-                '480': {'format': 'bestvideo[height<=854]+bestaudio/best[height<=854]', 'target': 854, 'name': '480p'},
-                '720': {'format': 'bestvideo[height<=1280]+bestaudio/best[height<=1280]', 'target': 1280,
-                        'name': '720p'},
-                '1080': {'format': 'bestvideo[height<=1920]+bestaudio/best[height<=1920]', 'target': 1920,
-                         'name': '1080p (Full HD)'},
-                'best': {'format': 'bestvideo+bestaudio/best', 'target': 9999, 'name': 'Eng yaxshi'}
-            }
+⚙️ **Sifat tanlovi:**
+• 144p - Eng yengil
+• 360p - Yaxshi
+• 480p - SD
+• 720p - HD
+• 1080p - Full HD
 
-        quality_config = quality_map.get(quality, quality_map['best'])
-        format_choice = quality_config['format']
-        target_height = quality_config['target']
-        quality_name = quality_config['name']
+⚠️ **Muhim:**
+• Faqat qisqa videolar (Shorts/Reels) yuklanadi
+• Oddiy uzun YouTube videolar qabul qilinmaydi
 
-        await query.edit_message_text(f"⏳ {quality_name} yuklanmoqda...")
+💬 **Yordam kerakmi?**
+Admin: @d_jumanazarov
+"""
+        keyboard = [[InlineKeyboardButton("◀️ Orqaga", callback_data="back_to_start")]]
 
-        timestamp = int(time.time())
-        output_template = f'downloads/{user_id}_{timestamp}_%(id)s.%(ext)s'
+        await query.edit_message_text(
+            text=help_text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
 
-        ydl_opts = {
-            'format': format_choice,
-            'outtmpl': output_template,
+    # Back to start button
+    if data == "back_to_start":
+        start_text = """
+🎬 **Salom! Shorts Video Downloader Botga xush kelibsiz!**
 
-            # ✨ YouTube bot detection bypass
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['ios', 'android', 'web'],
-                    'skip': ['hls', 'dash'],
-                    'player_skip': ['webpage', 'configs'],
-                }
-            },
+📌 **Qanday ishlaydi:**
+1️⃣ Faqat Shorts video linkini yuboring
+2️⃣ Sifatni tanlang
+3️⃣ Videoni yuklab oling!
 
-            # ✨ Better headers
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-            },
+✅ **Qo'llab-quvvatlanadigan formatlar:**
+• YouTube Shorts
+• Instagram Reels
+• TikTok videolar
 
-            'quiet': True,
-            'no_warnings': True,
-            'socket_timeout': 90,
-            'retries': 5,
-            'fragment_retries': 5,
-            'merge_output_format': 'mp4',
-            'prefer_ffmpeg': True,
-            'http_chunk_size': 10485760,
+⚠️ **Muhim:** Faqat qisqa videolar (Shorts/Reels) yuklanadi. Oddiy uzun YouTube videolar qabul qilinmaydi.
 
-            # ✨ Additional bypass options
-            'nocheckcertificate': True,
-            'age_limit': None,
-        }
+📊 **Yordam:** /help
+"""
+        keyboard = [[InlineKeyboardButton("📚 Yordam", callback_data="help")]]
 
-        os.makedirs('downloads', exist_ok=True)
-        loop = asyncio.get_event_loop()
+        await query.edit_message_text(
+            text=start_text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
 
-        def download():
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    video_path = ydl.prepare_filename(info)
-                    title = info.get('title', 'Video')
-                    actual_height = info.get('height', 0)
-                    actual_width = info.get('width', 0)
-                    duration = info.get('duration', 0)
-                    return video_path, title, actual_height, actual_width, duration
-            except Exception as e:
-                logger.error(f"Download error: {e}")
-                raise
-
-        # Retry mechanism
-        max_retries = 3
-        retry_count = 0
-        video_path = None
-
-        while retry_count < max_retries:
-            try:
-                video_path, title, actual_height, actual_width, duration = await loop.run_in_executor(None, download)
-                break
-            except Exception as e:
-                retry_count += 1
-                if retry_count >= max_retries:
-                    raise
-                logger.warning(f"Download failed, retry {retry_count}/{max_retries}")
-                await asyncio.sleep(2)
-                await query.edit_message_text(f"⏳ Qayta urinish {retry_count}/{max_retries}...")
-
-        # Duration check
-        if duration and duration > 180:
-            await query.edit_message_text(
-                "❌ *Bu video juda uzun!*\n\n"
-                f"Video davomiyligi: {duration // 60} daqiqa {duration % 60} soniya\n\n"
-                "Bot faqat qisqa videolar (Shorts/Reels) uchun.\n"
-                "💡 3 daqiqadan qisqa videolarni yuboring!",
-                parse_mode='Markdown'
-            )
-            if os.path.exists(video_path):
-                os.remove(video_path)
-            if user_id in user_videos:
-                del user_videos[user_id]
-            return
-
-        if not os.path.exists(video_path):
-            raise FileNotFoundError("Video fayl topilmadi")
-
-        file_size = os.path.getsize(video_path)
-        file_size_mb = file_size / (1024 * 1024)
-
-        is_vertical = actual_height > actual_width
-        video_type = "Vertikal" if is_vertical else "Gorizontal"
-
-        logger.info(
-            f"📊 {platform.upper()} | {video_type} | {actual_width}x{actual_height} | {file_size_mb:.1f}MB | {duration}s")
-
-        # Telegram file size limit
-        if file_size > 50 * 1024 * 1024:
-            await query.edit_message_text(
-                f"❌ *Video juda katta!*\n\n"
-                f"Hajm: {file_size_mb:.1f} MB\n"
-                f"Telegram limiti: 50 MB\n\n"
-                f"💡 Pastroq sifat tanlang!",
-                parse_mode='Markdown'
-            )
-            os.remove(video_path)
-            if user_id in user_videos:
-                del user_videos[user_id]
-            return
-
-        quality_info = ""
-        if quality != 'best' and actual_height < target_height:
-            quality_info = f"\n📌 Asl sifat: {actual_height}p"
-
-        await query.edit_message_text(f"📤 Telegram'ga yuborilmoqda... ({file_size_mb:.1f} MB)")
-
-        resolution_text = f"{actual_width}x{actual_height}"
-
-        # Send video with retry
-        max_send_retries = 2
-        send_retry = 0
-
-        while send_retry < max_send_retries:
-            try:
-                with open(video_path, 'rb') as video:
-                    await context.bot.send_video(
-                        chat_id=query.message.chat_id,
-                        video=video,
-                        caption=(
-                            f"✅ *{title[:70]}*\n\n"
-                            f"📊 So'ralgan: {quality_name}\n"
-                            f"📐 Yuborildi: {resolution_text}\n"
-                            f"🗂 Hajmi: {file_size_mb:.1f} MB{quality_info}\n\n"
-                            f"❗️ [Dilshod](https://t.me/d_jumanazarov) ga rahmat deb qo'yish esdan chiqmasin😁"
-                        ),
-                        supports_streaming=True,
-                        read_timeout=120,
-                        write_timeout=120,
-                        parse_mode='Markdown'
-                    )
-                break
-
-            except Exception as send_error:
-                send_retry += 1
-                if send_retry >= max_send_retries:
-                    raise
-                logger.warning(f"Send video failed, retry {send_retry}/{max_send_retries}")
-                await asyncio.sleep(3)
-
-        await query.delete_message()
-
-        # ✨ STATISTIKANI YANGILASH
-        db.increment_platform(platform)
-        db.increment_quality(quality_name)
-
-        # Cleanup
-        if os.path.exists(video_path):
-            os.remove(video_path)
-            logger.info(f"🗑 Deleted file: {video_path}")
-
-        if user_id in user_videos:
-            del user_videos[user_id]
-
-        logger.info(f"✅ {quality_name} → {resolution_text} | {file_size_mb:.1f}MB")
-
-    except asyncio.TimeoutError:
-        logger.error("Timeout error in quality_selected")
-        try:
-            await query.edit_message_text(
-                "❌ *Vaqt tugadi!*\n\n"
-                "Video yuklanmadi yoki yuborilmadi.\n\n"
-                "💡 Qaytadan urinib ko'ring",
-                parse_mode='Markdown'
-            )
-        except:
-            pass
-        if user_id in user_videos:
-            del user_videos[user_id]
-
-    except FileNotFoundError as e:
-        logger.error(f"File not found: {e}")
-        try:
-            await query.edit_message_text("❌ *Video fayl topilmadi!*\n\nQaytadan urinib ko'ring.")
-        except:
-            pass
-        if user_id in user_videos:
-            del user_videos[user_id]
-
-    except Exception as e:
-        logger.error(f"❌ quality_selected error: {e}", exc_info=True)
-        error_msg = str(e)
-
-        try:
-            if "Requested format is not available" in error_msg:
-                await query.edit_message_text("❌ *Bu sifat mavjud emas!*\n\n💡 Boshqa sifatni tanlang")
-            elif "Video is unavailable" in error_msg or "Private video" in error_msg:
-                await query.edit_message_text("❌ *Video mavjud emas yoki private!*\n\nBoshqa video linkini yuboring.")
-            elif "HTTP Error 429" in error_msg:
-                await query.edit_message_text("⏱ *Juda ko'p so'rov!*\n\n5 daqiqa kutib qaytadan urinib ko'ring.")
-            else:
-                await query.edit_message_text(
-                    f"❌ *Xatolik yuz berdi!*\n\n"
-                    f"Xatolik: {error_msg[:150]}\n\n"
-                    f"Qaytadan urinib ko'ring yoki @d_jumanazarov ga murojaat qiling."
-                )
-        except:
-            pass
-
-        if user_id in user_videos:
-            del user_videos[user_id]
-
-        # Cleanup
-        try:
-            if 'video_path' in locals() and video_path and os.path.exists(video_path):
-                os.remove(video_path)
-        except:
-            pass
+    # Quality selection
+    if data.startswith("quality_"):
+        await quality_selected(update, context)
+        return
 
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Echo handler"""
-    try:
+# ============================================================================
+# URL HANDLER
+# ============================================================================
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle video URL"""
+    user_id = update.effective_user.id
+    url = update.message.text.strip()
+
+    logger.info(f"📥 User {user_id} sent URL: {url[:50]}...")
+
+    # Check if URL is valid
+    platform = detect_platform(url)
+
+    if not platform:
         await update.message.reply_text(
-            "❓ *Shorts video linkini yuboring!*\n\n"
-            "✅ Qabul qilinadigan formatlar:\n"
+            "❌ Link tanilmadi!\n\n"
+            "✅ Qo'llab-quvvatlanadigan:\n"
             "• YouTube Shorts\n"
             "• Instagram Reels\n"
-            "• TikTok\n\n"
-            "Yordam: /help",
-            parse_mode='Markdown'
+            "• TikTok videolar"
         )
-    except Exception as e:
-        logger.error(f"echo error: {e}")
+        return
+
+    # Check if it's a shorts URL
+    if not is_shorts_url(url):
+        await update.message.reply_text(
+            "❌ Faqat qisqa videolar (Shorts/Reels) qo'llab-quvvatlanadi!\n\n"
+            "Oddiy uzun YouTube videolar yuklanmaydi."
+        )
+        return
+
+    logger.info(f"📊 Detected: {platform.upper()} - shorts")
+
+    # Rate limiting
+    now = datetime.now().timestamp()
+    last_time = user_last_download.get(user_id, 0)
+
+    if now - last_time < RATE_LIMIT_SECONDS:
+        wait_time = int(RATE_LIMIT_SECONDS - (now - last_time))
+        await update.message.reply_text(
+            f"⏳ Iltimos {wait_time} soniya kuting!"
+        )
+        return
+
+    # Store URL in context
+    context.user_data['url'] = url
+    context.user_data['platform'] = platform
+
+    # Show quality options
+    keyboard = [
+        [
+            InlineKeyboardButton("144p", callback_data="quality_144p"),
+            InlineKeyboardButton("360p", callback_data="quality_360p"),
+        ],
+        [
+            InlineKeyboardButton("480p (SD)", callback_data="quality_480p"),
+            InlineKeyboardButton("720p (HD)", callback_data="quality_720p"),
+        ],
+        [
+            InlineKeyboardButton("1080p (Full HD)", callback_data="quality_1080p"),
+        ],
+    ]
+
+    await update.message.reply_text(
+        f"✅ {platform.upper()} video topildi!\n\n"
+        "📊 Sifatni tanlang:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
-# ==================== SHUTDOWN ====================
-async def shutdown(application):
-    """Graceful shutdown"""
+# ============================================================================
+# QUALITY SELECTION AND DOWNLOAD
+# ============================================================================
+
+async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle quality selection"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    quality = query.data.replace("quality_", "")
+
+    url = context.user_data.get('url')
+    platform = context.user_data.get('platform')
+
+    if not url:
+        await query.edit_message_text("❌ Xatolik: URL topilmadi. Qaytadan urinib ko'ring.")
+        return
+
+    await query.edit_message_text(f"⏳ {quality} yuklanmoqda...")
+
+    # Update rate limit
+    user_last_download[user_id] = datetime.now().timestamp()
+
+    # Download video
     try:
-        logger.info("🛑 Bot to'xtatilmoqda...")
-        cleanup_old_files()
+        video_path, title, height, width, duration = await download_video(
+            url, quality, user_id, platform
+        )
 
-        if error_stats:
-            logger.info("📊 Final error stats:")
-            for error_type, count in error_stats.items():
-                logger.info(f"  - {error_type}: {count}")
+        # Determine orientation
+        is_vertical = height > width
+        orientation = "Vertikal" if is_vertical else "Gorizontal"
 
-        # Database yopish
-        db.close()
+        file_size = os.path.getsize(video_path)
+        size_str = format_size(file_size)
 
-        logger.info("✅ Bot to'xtatildi")
+        logger.info(f"📊 {platform.upper()} | {orientation} | {width}x{height} | {size_str} | {duration:.3f}s")
+
+        # Send video
+        with open(video_path, 'rb') as video_file:
+            caption = f"📹 {title[:100]}\n📊 {width}x{height} | {size_str}"
+
+            await query.message.reply_video(
+                video=video_file,
+                caption=caption,
+                supports_streaming=True,
+                width=width,
+                height=height,
+                duration=int(duration)
+            )
+
+        # Delete file
+        os.remove(video_path)
+        logger.info(f"🗑 Deleted file: {video_path}")
+
+        # Save to database
+        if db:
+            db.add_download(user_id, platform, quality, file_size)
+
+        # Success message
+        await query.message.reply_text(
+            f"✅ {quality} → {width}x{height} | {size_str}"
+        )
+
+        logger.info(f"✅ {quality} → {width}x{height} | {size_str}")
+
     except Exception as e:
-        logger.error(f"Shutdown error: {e}")
+        error_msg = str(e)
+        logger.error(f"❌ quality_selected error: {error_msg}")
+
+        if db:
+            db.log_error(user_id, error_msg)
+
+        await query.message.reply_text(
+            f"❌ Xatolik: {error_msg[:200]}\n\n"
+            "Qaytadan urinib ko'ring yoki boshqa link yuboring."
+        )
 
 
-# ==================== MAIN ====================
+async def download_video(url: str, quality: str, user_id: int, platform: str) -> Tuple[str, str, int, int, float]:
+    """Download video with yt-dlp"""
+    timestamp = int(datetime.now().timestamp())
+    output_template = str(DOWNLOAD_DIR / f"{user_id}_{timestamp}_%(id)s.%(ext)s")
+
+    # Quality format
+    max_height = QUALITY_PRESETS[quality]['height']
+    format_choice = f'best[height<={max_height}][ext=mp4]/best[height<={max_height}]/best'
+
+    # yt-dlp options
+    ydl_opts = {
+        'format': format_choice,
+        'outtmpl': output_template,
+
+        # YouTube bot detection bypass
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android', 'web'],
+                'skip': ['hls', 'dash'],
+                'player_skip': ['webpage', 'configs'],
+            }
+        },
+
+        # Better headers
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        },
+
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 90,
+        'retries': 5,
+        'fragment_retries': 5,
+        'merge_output_format': 'mp4',
+        'prefer_ffmpeg': True,
+        'http_chunk_size': 10485760,
+        'nocheckcertificate': True,
+        'age_limit': None,
+    }
+
+    def download():
+        """Sync download function"""
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+            # Get video info
+            title = sanitize_filename(info.get('title', 'video'))
+            video_id = info.get('id', 'unknown')
+            ext = info.get('ext', 'mp4')
+
+            # Get actual file path
+            video_path = DOWNLOAD_DIR / f"{user_id}_{timestamp}_{video_id}.{ext}"
+
+            # Get dimensions
+            width = info.get('width', 0)
+            height = info.get('height', 0)
+            duration = info.get('duration', 0)
+
+            return str(video_path), title, height, width, duration
+
+    # Run in executor with retries
+    loop = asyncio.get_event_loop()
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        try:
+            result = await loop.run_in_executor(None, download)
+            return result
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            if attempt < max_retries - 1:
+                logger.warning(f"Download failed, retry {attempt + 1}/{max_retries}")
+                await asyncio.sleep(2 ** attempt)
+            else:
+                raise
+
+
+# ============================================================================
+# ECHO HANDLER
+# ============================================================================
+
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle non-URL messages"""
+    await update.message.reply_text(
+        "❓ Link tanilmadi!\n\n"
+        "📌 Quyidagi formatlardan birini yuboring:\n"
+        "• YouTube Shorts\n"
+        "• Instagram Reels\n"
+        "• TikTok videolar\n\n"
+        "📊 Yordam: /help"
+    )
+
+
+# ============================================================================
+# ERROR HANDLER
+# ============================================================================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Global error handler"""
+    logger.error("❌ Exception while handling an update:", exc_info=context.error)
+    logger.error(f"Full traceback:\n{context.error}")
+
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "❌ Xatolik yuz berdi. Qaytadan urinib ko'ring.\n\n"
+                "Agar muammo davom etsa, admin bilan bog'laning: @d_jumanazarov"
+            )
+        except Exception:
+            pass
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
 def main():
-    """Main function"""
+    """Start the bot"""
+    logger.info("✅ Config loaded. Admin ID: %d", ADMIN_ID)
+    logger.info("🚀 Initializing bot...")
+
+    # Start health check server
     try:
-        logger.info("🚀 Initializing bot...")
-
-        # ✨ HEALTH CHECK SERVER
-        health_port = int(os.getenv('PORT', 8080))
-        health_thread = threading.Thread(
-            target=start_health_server,
-            args=(health_port,),
-            daemon=True
-        )
-        health_thread.start()
-        logger.info(f"✅ Health check server started on port {health_port}")
-
-        # Cleanup old files
-        cleanup_old_files()
-
-        # Build application
-        app = Application.builder().token(BOT_TOKEN).build()
-
-        # Global error handler
-        app.add_error_handler(error_handler)
-        logger.info("✅ Error handler registered")
-
-        # Command handlers
-        app.add_handler(CommandHandler("start", start))
-        logger.info("✅ /start handler registered")
-
-        app.add_handler(CommandHandler("help", help_command))
-        logger.info("✅ /help handler registered")
-
-        app.add_handler(CommandHandler("stats", stats_command))
-        logger.info("✅ /stats handler registered")
-
-        app.add_handler(CommandHandler("mystat", mystat_command))
-        logger.info("✅ /mystat handler registered")
-
-        app.add_handler(CommandHandler("errors", errors_command))
-        logger.info("✅ /errors handler registered")
-
-        # Message handlers
-        app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^https?://'), receive_link))
-        logger.info("✅ Link handler registered")
-
-        app.add_handler(CallbackQueryHandler(quality_selected, pattern='^quality_'))
-        logger.info("✅ Quality handler registered")
-
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-        logger.info("✅ Echo handler registered")
-
-        # Shutdown handler
-        app.post_shutdown = shutdown
-
-        # Start bot
-        logger.info("🤖 Bot ishga tushdi!")
-        logger.info("✅ Error handling enabled")
-        logger.info("✅ Auto-retry enabled")
-        logger.info("✅ Health check enabled")
-
-        # Run polling
-        app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-        )
-
+        from healthcheck import start_health_check_server
+        start_health_check_server()
+        logger.info("✅ Health check server started on port 8080")
     except Exception as e:
-        logger.critical(f"❌ CRITICAL ERROR in main(): {e}", exc_info=True)
-        raise
+        logger.warning(f"⚠️ Health check server not started: {e}")
+
+    # Create application
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Add handlers
+    app.add_error_handler(error_handler)
+    logger.info("✅ Error handler registered")
+
+    app.add_handler(CommandHandler("start", start_command))
+    logger.info("✅ /start handler registered")
+
+    app.add_handler(CommandHandler("help", help_command))
+    logger.info("✅ /help handler registered")
+
+    app.add_handler(CommandHandler("stats", stats_command))
+    logger.info("✅ /stats handler registered")
+
+    app.add_handler(CommandHandler("mystat", mystat_command))
+    logger.info("✅ /mystat handler registered")
+
+    app.add_handler(CommandHandler("errors", errors_command))
+    logger.info("✅ /errors handler registered")
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'http'), handle_url))
+    logger.info("✅ Link handler registered")
+
+    app.add_handler(CallbackQueryHandler(button_callback))
+    logger.info("✅ Quality handler registered")
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    logger.info("✅ Echo handler registered")
+
+    logger.info("🤖 Bot ishga tushdi!")
+    logger.info("✅ Error handling enabled")
+    logger.info("✅ Auto-retry enabled")
+    logger.info("✅ Health check enabled")
+
+    # Start polling
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
+    except Exception as e:
+        logger.critical(f"❌ CRITICAL ERROR in main(): {e}", exc_info=True)
+        raise
