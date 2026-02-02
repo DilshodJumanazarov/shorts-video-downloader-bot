@@ -23,7 +23,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 # ==================== CONFIG ====================
 # Local uchun default token, Railway'da environment variable
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8341836427:AAFwmm8aoTwo-HiD8h3CBDyGmxF-3ObL78M')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8341836427:AAHzwfnI68RJawROjOfHCwgAtkSQjvUg8nk')
 ADMIN_IDS = [int(os.getenv('ADMIN_ID', '6351892611'))]
 
 if not BOT_TOKEN:
