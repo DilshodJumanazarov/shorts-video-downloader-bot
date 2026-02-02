@@ -129,28 +129,28 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"👤 User {user.id} (@{user.username}) started bot")
 
     start_text = """
-🎬 **Salom! Shorts Video Downloader Botga xush kelibsiz!**
+🎬 <b>Salom! Shorts Video Downloader Botga xush kelibsiz!</b>
 
-📌 **Qanday ishlaydi:**
+📌 <b>Qanday ishlaydi:</b>
 1️⃣ Faqat Shorts video linkini yuboring
 2️⃣ Sifatni tanlang
 3️⃣ Videoni yuklab oling!
 
-✅ **Qo'llab-quvvatlanadigan formatlar:**
+✅ <b>Qo'llab-quvvatlanadigan formatlar:</b>
 • YouTube Shorts
 • Instagram Reels
 • TikTok videolar
 
-⚠️ **Muhim:** Faqat qisqa videolar (Shorts/Reels) yuklanadi. Oddiy uzun YouTube videolar qabul qilinmaydi.
+⚠️ <b>Muhim:</b> Faqat qisqa videolar (Shorts/Reels) yuklanadi. Oddiy uzun YouTube videolar qabul qilinmaydi.
 
-📊 **Yordam:** /help
+📊 <b>Yordam:</b> /help
 """
 
     keyboard = [[InlineKeyboardButton("📚 Yordam", callback_data="help")]]
 
     await update.message.reply_text(
         start_text,
-        parse_mode='Markdown',
+        parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -158,37 +158,37 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command"""
     help_text = """
-📚 **YORDAM - QANDAY ISHLAYDI?**
+📚 <b>YORDAM - QANDAY ISHLAYDI?</b>
 
-🎬 **Qo'llab-quvvatlanadigan formatlar:**
+🎬 <b>Qo'llab-quvvatlanadigan formatlar:</b>
 • YouTube Shorts
 • Instagram Reels
 • TikTok videolar
 
-📝 **Ishlatish:**
+📝 <b>Ishlatish:</b>
 1️⃣ Faqat Shorts video linkini yuboring
 2️⃣ Sifatni tanlang
 3️⃣ Videoni yuklab oling!
 
-⚙️ **Sifat tanlovi:**
+⚙️ <b>Sifat tanlovi:</b>
 • 144p - Eng yengil
 • 360p - Yaxshi
 • 480p - SD
 • 720p - HD
 • 1080p - Full HD
 
-⚠️ **Muhim:**
+⚠️ <b>Muhim:</b>
 • Faqat qisqa videolar (Shorts/Reels) yuklanadi
 • Oddiy uzun YouTube videolar qabul qilinmaydi
 
-💬 **Yordam kerakmi?**
+💬 <b>Yordam kerakmi?</b>
 Admin: @d_jumanazarov
 
-📊 **Boshqa komandalar:**
+📊 <b>Boshqa komandalar:</b>
 /mystat - Sizning statistikangiz
 """
 
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode='HTML')
 
 
 async def mystat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -202,7 +202,7 @@ async def mystat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = db.get_user_stats(user_id)
 
     stat_text = f"""
-📊 **Sizning statistikangiz:**
+📊 <b>Sizning statistikangiz:</b>
 
 📥 Jami yuklashlar: {stats['downloads']}
 🎬 YouTube: {stats['youtube']}
@@ -216,7 +216,7 @@ async def mystat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     stat_text += f"\n🕐 {stats['last_download']}"
 
-    await update.message.reply_text(stat_text, parse_mode='Markdown')
+    await update.message.reply_text(stat_text, parse_mode='HTML')
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,7 +234,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = db.get_global_stats()
 
     stat_text = f"""
-📊 **GLOBAL STATISTIKA**
+📊 <b>GLOBAL STATISTIKA</b>
 
 👥 Jami foydalanuvchilar: {stats['total_users']}
 📥 Jami yuklashlar: {stats['total_downloads']}
@@ -252,7 +252,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     stat_text += f"\n• Eng yaxshi: {stats['most_used']}\n"
 
-    await update.message.reply_text(stat_text, parse_mode='Markdown')
+    await update.message.reply_text(stat_text, parse_mode='HTML')
 
 
 async def errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,14 +273,14 @@ async def errors_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Hech qanday xatolik yo'q!")
         return
 
-    error_text = "❌ **OXIRGI XATOLIKLAR:**\n\n"
+    error_text = "❌ <b>OXIRGI XATOLIKLAR:</b>\n\n"
 
     for error in errors:
         error_text += f"🕐 {error['timestamp']}\n"
         error_text += f"👤 User: {error['user_id']}\n"
         error_text += f"⚠️ {error['error_message'][:100]}...\n\n"
 
-    await update.message.reply_text(error_text, parse_mode='Markdown')
+    await update.message.reply_text(error_text, parse_mode='HTML')
 
 
 # ============================================================================
@@ -297,37 +297,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Help button
     if data == "help":
         help_text = """
-📚 **YORDAM - QANDAY ISHLAYDI?**
+📚 <b>YORDAM - QANDAY ISHLAYDI?</b>
 
-🎬 **Qo'llab-quvvatlanadigan formatlar:**
+🎬 <b>Qo'llab-quvvatlanadigan formatlar:</b>
 • YouTube Shorts
 • Instagram Reels
 • TikTok videolar
 
-📝 **Ishlatish:**
+📝 <b>Ishlatish:</b>
 1️⃣ Faqat Shorts video linkini yuboring
 2️⃣ Sifatni tanlang
 3️⃣ Videoni yuklab oling!
 
-⚙️ **Sifat tanlovi:**
+⚙️ <b>Sifat tanlovi:</b>
 • 144p - Eng yengil
 • 360p - Yaxshi
 • 480p - SD
 • 720p - HD
 • 1080p - Full HD
 
-⚠️ **Muhim:**
+⚠️ <b>Muhim:</b>
 • Faqat qisqa videolar (Shorts/Reels) yuklanadi
 • Oddiy uzun YouTube videolar qabul qilinmaydi
 
-💬 **Yordam kerakmi?**
+💬 <b>Yordam kerakmi?</b>
 Admin: @d_jumanazarov
 """
         keyboard = [[InlineKeyboardButton("◀️ Orqaga", callback_data="back_to_start")]]
 
         await query.edit_message_text(
             text=help_text,
-            parse_mode='Markdown',
+            parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
@@ -335,27 +335,27 @@ Admin: @d_jumanazarov
     # Back to start button
     if data == "back_to_start":
         start_text = """
-🎬 **Salom! Shorts Video Downloader Botga xush kelibsiz!**
+🎬 <b>Salom! Shorts Video Downloader Botga xush kelibsiz!</b>
 
-📌 **Qanday ishlaydi:**
+📌 <b>Qanday ishlaydi:</b>
 1️⃣ Faqat Shorts video linkini yuboring
 2️⃣ Sifatni tanlang
 3️⃣ Videoni yuklab oling!
 
-✅ **Qo'llab-quvvatlanadigan formatlar:**
+✅ <b>Qo'llab-quvvatlanadigan formatlar:</b>
 • YouTube Shorts
 • Instagram Reels
 • TikTok videolar
 
-⚠️ **Muhim:** Faqat qisqa videolar (Shorts/Reels) yuklanadi. Oddiy uzun YouTube videolar qabul qilinmaydi.
+⚠️ <b>Muhim:</b> Faqat qisqa videolar (Shorts/Reels) yuklanadi. Oddiy uzun YouTube videolar qabul qilinmaydi.
 
-📊 **Yordam:** /help
+📊 <b>Yordam:</b> /help
 """
         keyboard = [[InlineKeyboardButton("📚 Yordam", callback_data="help")]]
 
         await query.edit_message_text(
             text=start_text,
-            parse_mode='Markdown',
+            parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
