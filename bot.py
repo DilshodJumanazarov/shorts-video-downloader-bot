@@ -23,7 +23,7 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 # ==================== CONFIG ====================
 # Local uchun default token, Railway'da environment variable
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8341836427:AAFEx2tW_eatg8u6uRvTrlpLJ6rGJiQxaRc')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '8341836427:AAFwmm8aoTwo-HiD8h3CBDyGmxF-3ObL78M')
 ADMIN_IDS = [int(os.getenv('ADMIN_ID', '6351892611'))]
 
 if not BOT_TOKEN:
@@ -468,16 +468,27 @@ async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ydl_opts = {
             'format': format_choice,
             'outtmpl': output_template,
+
+            # ✨ YouTube bot detection bypass
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'web'],
-                    'skip': ['hls', 'dash']
+                    'player_client': ['ios', 'android', 'web'],
+                    'skip': ['hls', 'dash'],
+                    'player_skip': ['webpage', 'configs'],
                 }
             },
+
+            # ✨ Better headers
             'http_headers': {
-                'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip',
-                'Accept-Language': 'en-US,en;q=0.9',
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
             },
+
             'quiet': True,
             'no_warnings': True,
             'socket_timeout': 90,
@@ -486,6 +497,10 @@ async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'merge_output_format': 'mp4',
             'prefer_ffmpeg': True,
             'http_chunk_size': 10485760,
+
+            # ✨ Additional bypass options
+            'nocheckcertificate': True,
+            'age_limit': None,
         }
 
         os.makedirs('downloads', exist_ok=True)
