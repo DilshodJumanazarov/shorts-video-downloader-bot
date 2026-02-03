@@ -438,23 +438,69 @@ async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"✅ {quality} → {width}x{height} | {size_str}")
 
+
     except Exception as e:
+
         error_msg = str(e)
+
         logger.error(f"❌ quality_selected error: {error_msg}")
 
         # Delete loading message
+
         try:
+
             await loading_msg.delete()
+
         except:
+
             pass
 
         if db:
             db.log_error(user_id, error_msg)
 
-        await query.message.reply_text(
-            f"❌ Xatolik: {error_msg[:200]}\n\n"
-            "Qaytadan urinib ko'ring yoki boshqa link yuboring."
-        )
+        # YouTube-specific error message
+
+        if 'youtube' in error_msg.lower() and ('bot' in error_msg.lower() or 'sign in' in error_msg.lower()):
+
+            await query.message.reply_text(
+
+                "⚠️ <b>YouTube Bot Detection</b>\n\n"
+
+                "❌ YouTube serverlar botni aniqladi va blokladi.\n\n"
+
+                "🔄 <b>Nima qilish kerak:</b>\n"
+
+                "1️⃣ Boshqa YouTube Shorts linkini sinab ko'ring\n"
+
+                "2️⃣ Instagram Reels ishlatish yaxshiroq ✅\n"
+
+                "3️⃣ TikTok ham 100% ishlaydi ✅\n\n"
+
+                "📝 <b>Sabab:</b> YouTube bot detection juda kuchli.\n"
+
+                "Ba'zi videolar yuklanadi, ba'zilari bloklangan.\n\n"
+
+                "💡 <b>Tavsiya:</b> Instagram yoki TikTok ishonchli!",
+
+                parse_mode='HTML'
+
+            )
+
+        else:
+
+            # Other errors
+
+            await query.message.reply_text(
+
+                f"❌ <b>Xatolik yuz berdi:</b>\n\n"
+
+                f"<code>{error_msg[:250]}</code>\n\n"
+
+                "Qaytadan urinib ko'ring yoki boshqa link yuboring.",
+
+                parse_mode='HTML'
+
+            )
 
 
 async def download_video(url: str, quality: str, user_id: int, platform: str) -> Tuple[str, str, int, int, float]:
