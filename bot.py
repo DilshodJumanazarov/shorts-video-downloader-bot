@@ -459,47 +459,41 @@ async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.log_error(user_id, error_msg)
 
         # YouTube-specific error message
-
         if 'youtube' in error_msg.lower() and ('bot' in error_msg.lower() or 'sign in' in error_msg.lower()):
-
             await query.message.reply_text(
-
                 "⚠️ <b>YouTube Bot Detection</b>\n\n"
-
                 "❌ YouTube serverlar botni aniqladi va blokladi.\n\n"
-
                 "🔄 <b>Nima qilish kerak:</b>\n"
-
                 "1️⃣ Boshqa YouTube Shorts linkini sinab ko'ring\n"
-
-                "2️⃣ Instagram Reels ishlatish yaxshiroq ✅\n"
-
-                "3️⃣ TikTok ham 100% ishlaydi ✅\n\n"
-
+                "2️⃣ Instagram Reels ishlatish yaxshiroq ✅\n\n"
                 "📝 <b>Sabab:</b> YouTube bot detection juda kuchli.\n"
-
                 "Ba'zi videolar yuklanadi, ba'zilari bloklangan.\n\n"
-
-                "💡 <b>Tavsiya:</b> Instagram yoki TikTok ishonchli!",
-
+                "💡 <b>Tavsiya:</b> Instagram eng ishonchli!",
                 parse_mode='HTML'
-
             )
-
-        else:
-
-            # Other errors
-
+        # TikTok-specific error message
+        elif 'tiktok' in error_msg.lower() and (
+                'not available' in error_msg.lower() or 'status code 0' in error_msg.lower()):
             await query.message.reply_text(
-
-                f"❌ <b>Xatolik yuz berdi:</b>\n\n"
-
-                f"<code>{error_msg[:250]}</code>\n\n"
-
-                "Qaytadan urinib ko'ring yoki boshqa link yuboring.",
-
+                "⚠️ <b>TikTok Video Mavjud Emas</b>\n\n"
+                "❌ TikTok video yuklab olinmadi.\n\n"
+                "🔍 <b>Ehtimoliy sabablar:</b>\n"
+                "• Video o'chirilgan yoki maxfiy 🔒\n"
+                "• Mamlakat bo'yicha bloklangan 🌍\n"
+                "• TikTok bot detection 🤖\n\n"
+                "🔄 <b>Tavsiya:</b>\n"
+                "1️⃣ Boshqa TikTok video sinab ko'ring\n"
+                "2️⃣ Instagram Reels 100% ishlaydi ✅\n\n"
+                "💡 <b>Eng yaxshisi:</b> Instagram Reels ishlatish!",
                 parse_mode='HTML'
-
+            )
+        else:
+            # Other errors
+            await query.message.reply_text(
+                f"❌ <b>Xatolik yuz berdi:</b>\n\n"
+                f"<code>{error_msg[:250]}</code>\n\n"
+                "Qaytadan urinib ko'ring yoki boshqa link yuboring.",
+                parse_mode='HTML'
             )
 
 
