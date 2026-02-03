@@ -1,180 +1,234 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Lightweight SQLite database for bot statistics
+"""
+
 import sqlite3
-from datetime import datetime
 import logging
+from datetime import datetime
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
-    """Light database - faqat asosiy statistika"""
+    """Simple database for bot statistics"""
 
-    def __init__(self, db_name='bot_stats.db'):
-        """Database yaratish"""
-        try:
-            self.conn = sqlite3.connect(db_name, check_same_thread=False)
+    def __init__(self, db_path: str = "bot_stats.db"):
+        """Initialize database"""
+        self.db_path = Path(db_path)
+        self.conn = None
+        self._create_tables()
+        logger.info(f"✅ Light Database initialized: {db_path}")
+
+    def _get_connection(self):
+        """Get database connection"""
+        if self.conn is None:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
-            self.create_tables()
-            logger.info(f"✅ Light Database initialized: {db_name}")
-        except Exception as e:
-            logger.error(f"Database error: {e}")
+        return self.conn
 
-    def create_tables(self):
-        """Oddiy jadvallar yaratish"""
-        cursor = self.conn.cursor()
+    def _create_tables(self):
+        """Create database tables"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
 
-        # Users jadvali - faqat asosiy ma'lumot
+        # Users table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
-                first_name TEXT,
-                first_seen TEXT,
-                last_seen TEXT
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
-        # Platform statistikasi - faqat counter
+        # Downloads table
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS platform_stats (
-                platform TEXT PRIMARY KEY,
-                downloads INTEGER DEFAULT 0
+            CREATE TABLE IF NOT EXISTS downloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                platform TEXT,
+                quality TEXT,
+                file_size INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         ''')
 
-        # Quality statistikasi - faqat counter
+        # Errors table
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS quality_stats (
-                quality TEXT PRIMARY KEY,
-                count INTEGER DEFAULT 0
+            CREATE TABLE IF NOT EXISTS errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                error_message TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
 
-        self.conn.commit()
+        conn.commit()
         logger.info("✅ Database tables created")
 
-    def add_user(self, user_id, username=None, first_name=None):
-        """User qo'shish yoki yangilash"""
-        try:
-            cursor = self.conn.cursor()
-            now = datetime.now().isoformat()
+    def add_user(self, user_id: int, username: str):
+        """Add or update user"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
 
-            # User mavjudligini tekshirish
-            cursor.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
-            exists = cursor.fetchone()
+        cursor.execute('''
+            INSERT INTO users (user_id, username, first_seen, last_seen)
+            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                last_seen = CURRENT_TIMESTAMP
+        ''', (user_id, username))
 
-            if exists:
-                # Faqat last_seen yangilash
-                cursor.execute('''
-                    UPDATE users SET last_seen = ?, username = ?, first_name = ?
-                    WHERE user_id = ?
-                ''', (now, username, first_name, user_id))
-            else:
-                # Yangi user qo'shish
-                cursor.execute('''
-                    INSERT INTO users (user_id, username, first_name, first_seen, last_seen)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (user_id, username, first_name, now, now))
+        conn.commit()
 
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error adding user: {e}")
-            return False
+    def add_download(self, user_id: int, platform: str, quality: str, file_size: int):
+        """Record a download"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
 
-    def increment_platform(self, platform):
-        """Platform counterini oshirish"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                INSERT INTO platform_stats (platform, downloads) VALUES (?, 1)
-                ON CONFLICT(platform) DO UPDATE SET downloads = downloads + 1
-            ''', (platform,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error incrementing platform: {e}")
-            return False
+        cursor.execute('''
+            INSERT INTO downloads (user_id, platform, quality, file_size)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, platform, quality, file_size))
 
-    def increment_quality(self, quality):
-        """Quality counterini oshirish"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                INSERT INTO quality_stats (quality, count) VALUES (?, 1)
-                ON CONFLICT(quality) DO UPDATE SET count = count + 1
-            ''', (quality,))
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Error incrementing quality: {e}")
-            return False
+        # Update last_seen
+        cursor.execute('''
+            UPDATE users SET last_seen = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+        ''', (user_id,))
 
-    def get_total_users(self):
-        """Jami userlar"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('SELECT COUNT(*) FROM users')
-            return cursor.fetchone()[0]
-        except Exception as e:
-            logger.error(f"Error getting total users: {e}")
-            return 0
+        conn.commit()
 
-    def get_total_downloads(self):
-        """Jami yuklanishlar"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('SELECT SUM(downloads) FROM platform_stats')
-            result = cursor.fetchone()[0]
-            return result if result else 0
-        except Exception as e:
-            logger.error(f"Error getting total downloads: {e}")
-            return 0
+    def log_error(self, user_id: int, error_message: str):
+        """Log an error"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
 
-    def get_platform_stats(self):
-        """Platform statistikasi"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT platform, downloads 
-                FROM platform_stats 
-                ORDER BY downloads DESC
-            ''')
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting platform stats: {e}")
-            return []
+        cursor.execute('''
+            INSERT INTO errors (user_id, error_message)
+            VALUES (?, ?)
+        ''', (user_id, error_message))
 
-    def get_quality_stats(self):
-        """Sifat statistikasi"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT quality, count 
-                FROM quality_stats 
-                ORDER BY count DESC
-            ''')
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting quality stats: {e}")
-            return []
+        conn.commit()
 
-    def get_recent_users(self, limit=5):
-        """Oxirgi userlar"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                SELECT user_id, username, first_name, last_seen 
-                FROM users 
-                ORDER BY last_seen DESC 
-                LIMIT ?
-            ''', (limit,))
-            return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error getting recent users: {e}")
-            return []
+    def get_user_stats(self, user_id: int) -> dict:
+        """Get user statistics"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # Total downloads
+        cursor.execute('''
+            SELECT COUNT(*) as count FROM downloads WHERE user_id = ?
+        ''', (user_id,))
+        total = cursor.fetchone()['count']
+
+        # Platform breakdown
+        cursor.execute('''
+            SELECT platform, COUNT(*) as count
+            FROM downloads
+            WHERE user_id = ?
+            GROUP BY platform
+        ''', (user_id,))
+        platforms = {row['platform']: row['count'] for row in cursor.fetchall()}
+
+        # Top qualities
+        cursor.execute('''
+            SELECT quality, COUNT(*) as count
+            FROM downloads
+            WHERE user_id = ?
+            GROUP BY quality
+            ORDER BY count DESC
+            LIMIT 5
+        ''', (user_id,))
+        top_qualities = [(row['quality'], row['count']) for row in cursor.fetchall()]
+
+        # Last download
+        cursor.execute('''
+            SELECT MAX(timestamp) as last_time FROM downloads WHERE user_id = ?
+        ''', (user_id,))
+        last = cursor.fetchone()['last_time']
+
+        return {
+            'downloads': total,
+            'youtube': platforms.get('youtube', 0),
+            'instagram': platforms.get('instagram', 0),
+            'tiktok': platforms.get('tiktok', 0),
+            'top_qualities': top_qualities if top_qualities else [('None', 0)],
+            'last_download': last or 'Hech qachon',
+        }
+
+    def get_global_stats(self) -> dict:
+        """Get global statistics"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # Total users
+        cursor.execute('SELECT COUNT(*) as count FROM users')
+        total_users = cursor.fetchone()['count']
+
+        # Total downloads
+        cursor.execute('SELECT COUNT(*) as count FROM downloads')
+        total_downloads = cursor.fetchone()['count']
+
+        # Platform breakdown
+        cursor.execute('''
+            SELECT platform, COUNT(*) as count
+            FROM downloads
+            GROUP BY platform
+        ''')
+        platforms = {row['platform']: row['count'] for row in cursor.fetchall()}
+
+        # Top qualities
+        cursor.execute('''
+            SELECT quality, COUNT(*) as count
+            FROM downloads
+            GROUP BY quality
+            ORDER BY count DESC
+            LIMIT 5
+        ''')
+        top_qualities = [(row['quality'], row['count']) for row in cursor.fetchall()]
+
+        # Most used quality
+        most_used = top_qualities[0][0] if top_qualities else 'None'
+
+        return {
+            'total_users': total_users,
+            'total_downloads': total_downloads,
+            'youtube': platforms.get('youtube', 0),
+            'instagram': platforms.get('instagram', 0),
+            'tiktok': platforms.get('tiktok', 0),
+            'top_qualities': top_qualities if top_qualities else [('None', 0)],
+            'most_used': most_used,
+        }
+
+    def get_recent_errors(self, limit: int = 10) -> list:
+        """Get recent errors"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT user_id, error_message, timestamp
+            FROM errors
+            ORDER BY timestamp DESC
+            LIMIT ?
+        ''', (limit,))
+
+        return [
+            {
+                'user_id': row['user_id'],
+                'error_message': row['error_message'],
+                'timestamp': row['timestamp'],
+            }
+            for row in cursor.fetchall()
+        ]
 
     def close(self):
-        """Database yopish"""
+        """Close database connection"""
         if self.conn:
             self.conn.close()
-            logger.info("✅ Database closed")
+            self.conn = None
