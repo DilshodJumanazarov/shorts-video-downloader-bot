@@ -1,29 +1,41 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Health check HTTP server for Render
+"""
+
 import logging
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 logger = logging.getLogger(__name__)
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Health check endpoint"""
+    """Simple health check handler"""
 
     def do_GET(self):
-        """Health check response"""
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'OK - Bot is running')
+        """Handle GET requests"""
+        if self.path == '/' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, format, *args):
-        """Loglarni o'chirish"""
+        """Suppress default logging"""
         pass
 
 
-def start_health_server(port=8080):
-    """Health check server'ni ishga tushirish"""
-    try:
-        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        logger.info(f"✅ Health check server started on port {port}")
-        server.serve_forever()
-    except Exception as e:
-        logger.error(f"Health check server error: {e}")
+def start_health_check_server(port=8080):
+    """Start health check server in background thread"""
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    logger.info(f"✅ Health check server started on port {port}")

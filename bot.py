@@ -146,13 +146,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 <b>Yordam:</b> /help
 """
 
-    keyboard = [[InlineKeyboardButton("📚 Yordam", callback_data="help")]]
-
-    await update.message.reply_text(
-        start_text,
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    # BUTTON O'CHIRILDI - faqat text
+    await update.message.reply_text(start_text, parse_mode='HTML')
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -294,77 +289,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    # Help button
-    if data == "help":
-        help_text = """
-📚 <b>YORDAM - QANDAY ISHLAYDI?</b>
-
-🎬 <b>Qo'llab-quvvatlanadigan formatlar:</b>
-• YouTube Shorts
-• Instagram Reels
-• TikTok videolar
-
-📝 <b>Ishlatish:</b>
-1️⃣ Faqat Shorts video linkini yuboring
-2️⃣ Sifatni tanlang
-3️⃣ Videoni yuklab oling!
-
-⚙️ <b>Sifat tanlovi:</b>
-• 144p - Eng yengil
-• 360p - Yaxshi
-• 480p - SD
-• 720p - HD
-• 1080p - Full HD
-
-⚠️ <b>Muhim:</b>
-• Faqat qisqa videolar (Shorts/Reels) yuklanadi
-• Oddiy uzun YouTube videolar qabul qilinmaydi
-
-💬 <b>Yordam kerakmi?</b>
-Admin: @d_jumanazarov
-"""
-        keyboard = [[InlineKeyboardButton("◀️ Orqaga", callback_data="back_to_start")]]
-
-        await query.edit_message_text(
-            text=help_text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-
-    # Back to start button
-    if data == "back_to_start":
-        start_text = """
-🎬 <b>Salom! Shorts Video Downloader Botga xush kelibsiz!</b>
-
-📌 <b>Qanday ishlaydi:</b>
-1️⃣ Faqat Shorts video linkini yuboring
-2️⃣ Sifatni tanlang
-3️⃣ Videoni yuklab oling!
-
-✅ <b>Qo'llab-quvvatlanadigan formatlar:</b>
-• YouTube Shorts
-• Instagram Reels
-• TikTok videolar
-
-⚠️ <b>Muhim:</b> Faqat qisqa videolar (Shorts/Reels) yuklanadi. Oddiy uzun YouTube videolar qabul qilinmaydi.
-
-📊 <b>Yordam:</b> /help
-"""
-        keyboard = [[InlineKeyboardButton("📚 Yordam", callback_data="help")]]
-
-        await query.edit_message_text(
-            text=start_text,
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-
     # Quality selection
     if data.startswith("quality_"):
         await quality_selected(update, context)
         return
-
 
 # ============================================================================
 # URL HANDLER
@@ -451,10 +379,15 @@ async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     platform = context.user_data.get('platform')
 
     if not url:
-        await query.edit_message_text("❌ Xatolik: URL topilmadi. Qaytadan urinib ko'ring.")
+        await query.answer("❌ Xatolik: URL topilmadi")
+        await query.message.reply_text("❌ Xatolik: URL topilmadi. Qaytadan link yuboring.")
         return
 
-    await query.edit_message_text(f"⏳ {quality} yuklanmoqda...")
+    # Answer callback first
+    await query.answer(f"⏳ {quality} yuklanmoqda...")
+
+    # Send loading message (NEW MESSAGE, not edit!)
+    loading_msg = await query.message.reply_text(f"⏳ {quality} yuklanmoqda...")
 
     # Update rate limit
     user_last_download[user_id] = datetime.now().timestamp()
@@ -473,6 +406,9 @@ async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_str = format_size(file_size)
 
         logger.info(f"📊 {platform.upper()} | {orientation} | {width}x{height} | {size_str} | {duration:.3f}s")
+
+        # Delete loading message
+        await loading_msg.delete()
 
         # Send video
         with open(video_path, 'rb') as video_file:
@@ -505,6 +441,12 @@ async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         error_msg = str(e)
         logger.error(f"❌ quality_selected error: {error_msg}")
+
+        # Delete loading message
+        try:
+            await loading_msg.delete()
+        except:
+            pass
 
         if db:
             db.log_error(user_id, error_msg)
